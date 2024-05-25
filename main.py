@@ -53,14 +53,16 @@ def generate_embeddings_and_retrieve_info(documents):
         llm = OpenAI(model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
         qa_chain = load_qa_chain(llm, chain_type="stuff")
 
-        query = "Please provide a summary of the document in markdown format for notion document with full notes"
+        query = """
+        Please provide a summary of the lecture in markdown format for notion document with full attention to details use Amazon style guiding
+        """
         response = qa_chain.run(input_documents=documents, question=query)
         return response
     except Exception as e:
         print(f"Error generating embeddings or retrieving information: {e}")
         return None
 
-# Function to split text into blocks
+# Function to split text into blocks with headings support
 def split_text_to_blocks(text, max_length=2000):
     blocks = []
     while len(text) > max_length:
@@ -69,15 +71,72 @@ def split_text_to_blocks(text, max_length=2000):
             split_index = text.rfind(' ', 0, max_length)
         if split_index == -1:
             split_index = max_length
-        blocks.append(text[:split_index])
+        
+        block = text[:split_index]
         text = text[split_index:].strip()
+
+        # Ensure block ends with a complete sentence
+        if not block.endswith('.') and len(text) > 0:
+            sentence_end_index = block.rfind('.')
+            if sentence_end_index != -1:
+                split_index = sentence_end_index + 1
+                block = block[:split_index]
+                text = text[split_index:].strip()
+
+        blocks.append(block)
     blocks.append(text)
     return blocks
 
-def create_notion_page(content):
-    blocks = split_text_to_blocks(content)
-    children = [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": block}}]}} for block in blocks]
 
+def create_notion_page(content):
+    blocks = []
+    for line in content.split('\n'):
+        if line.startswith("# "):
+            blocks.append({
+                "object": "block",
+                "type": "heading_1",
+                "heading_1": {"rich_text": [{"type": "text", "text": {"content": line[2:]}}]}
+            })
+        elif line.startswith("## "):
+            blocks.append({
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"type": "text", "text": {"content": line[3:]}}]}
+            })
+        elif line.startswith("### "):
+            blocks.append({
+                "object": "block",
+                "type": "heading_3",
+                "heading_3": {"rich_text": [{"type": "text", "text": {"content": line[4:]}}]}
+            })
+        elif line.startswith("- "):
+            blocks.append({
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": line[2:]}}]}
+            })
+        elif line.startswith("1. "):
+            blocks.append({
+                "object": "block",
+                "type": "numbered_list_item",
+                "numbered_list_item": {"rich_text": [{"type": "text", "text": {"content": line[3:]}}]}
+            })
+        else:
+            rich_text = []
+            parts = line.split('**')
+            for i, part in enumerate(parts):
+                if i % 2 == 0:
+                    subparts = part.split('*')
+                    for j, subpart in enumerate(subparts):
+                        if j % 2 == 0:
+                            rich_text.append({"type": "text", "text": {"content": subpart}})
+                        else:
+                            rich_text.append({"type": "text", "text": {"content": subpart, "annotations": {"italic": True}}})
+                else:
+                    rich_text.append({"type": "text", "text": {"content": part, "annotations": {"bold": True}}})
+
+            blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": rich_text}})
+    
     data = {
         "parent": {"type": "page_id", "page_id": PARENT_PAGE_ID},
         "properties": {
@@ -91,7 +150,7 @@ def create_notion_page(content):
                 ]
             }
         },
-        "children": children
+        "children": blocks
     }
 
     response = requests.post(
@@ -104,6 +163,7 @@ def create_notion_page(content):
         return "Page created successfully!"
     else:
         return f"Failed to create page. Status code: {response.status_code}. Response: {response.text}"
+
 
 @app.post("/process-pdf/")
 async def process_pdf(file: UploadFile = File(...)):

@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import requests
 import json
 import openai
@@ -15,6 +16,15 @@ from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # You can restrict this to specific domains
+    allow_credentials=True,
+    allow_methods=["*"],  # You can restrict this to specific methods
+    allow_headers=["*"],  # You can restrict this to specific headers
+)
 
 # Get environment variables
 DATABASE_ID = os.getenv('DATABASE_ID')

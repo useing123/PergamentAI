@@ -1,8 +1,9 @@
-fastapi==0.70.0
-requests==2.26.0
-json5==0.9.6
-langchain==0.1.1
-openai==0.12.4
-python-dotenv==0.19.2
-pdfminer.six==20201018
-faiss-cpu==1.7.0
+fastapi
+requests
+json5
+langchain
+openai
+python-dotenv
+pdfminer.six
+faiss-cpu
+langchain-community

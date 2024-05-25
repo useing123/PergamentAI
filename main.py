@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import requests
@@ -40,53 +40,29 @@ headers = {
     "Notion-Version": "2022-06-28"
 }
 
-def extract_text_from_pdf(pdf_path: str):
-    loader = PDFMinerLoader(pdf_path)
-    documents = loader.load()
-    return documents
+chat_history = []
+pdf_documents = []
 
-def generate_embeddings_and_retrieve_info(documents):
-    try:
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    while True:
+        data = await websocket.receive_text()
+        chat_history.append(data)
+
+        if not pdf_documents:
+            await websocket.send_text("Please upload a PDF file first.")
+            continue
+
         embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-        vector_store = FAISS.from_documents(documents, embeddings)
+        vector_store = FAISS.from_documents(pdf_documents, embeddings)
         retriever = vector_store.as_retriever()
         llm = OpenAI(model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
         qa_chain = load_qa_chain(llm, chain_type="stuff")
 
-        query = """
-        Please provide a summary of the lecture in markdown format for notion document with full attention to details use Amazon style guiding
-        """
-        response = qa_chain.run(input_documents=documents, question=query)
-        return response
-    except Exception as e:
-        print(f"Error generating embeddings or retrieving information: {e}")
-        return None
-
-# Function to split text into blocks with headings support
-def split_text_to_blocks(text, max_length=2000):
-    blocks = []
-    while len(text) > max_length:
-        split_index = text.rfind('\n', 0, max_length)
-        if split_index == -1:
-            split_index = text.rfind(' ', 0, max_length)
-        if split_index == -1:
-            split_index = max_length
-        
-        block = text[:split_index]
-        text = text[split_index:].strip()
-
-        # Ensure block ends with a complete sentence
-        if not block.endswith('.') and len(text) > 0:
-            sentence_end_index = block.rfind('.')
-            if sentence_end_index != -1:
-                split_index = sentence_end_index + 1
-                block = block[:split_index]
-                text = text[split_index:].strip()
-
-        blocks.append(block)
-    blocks.append(text)
-    return blocks
-
+        response = qa_chain.run(input_documents=pdf_documents, question=data)
+        chat_history.append(response)
+        await websocket.send_text(response)
 
 def create_notion_page(content):
     blocks = []
@@ -164,6 +140,59 @@ def create_notion_page(content):
     else:
         return f"Failed to create page. Status code: {response.status_code}. Response: {response.text}"
 
+@app.post("/send-to-notion")
+async def send_to_notion():
+    content = "\n".join(chat_history)
+    result = create_notion_page(content)
+    if "successfully" in result:
+        return JSONResponse(content={"message": result})
+    else:
+        raise HTTPException(status_code=500, detail=result)
+
+def extract_text_from_pdf(pdf_path: str):
+    loader = PDFMinerLoader(pdf_path)
+    documents = loader.load()
+    return documents
+
+def generate_embeddings_and_retrieve_info(documents):
+    try:
+        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+        vector_store = FAISS.from_documents(documents, embeddings)
+        retriever = vector_store.as_retriever()
+        llm = OpenAI(model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
+        qa_chain = load_qa_chain(llm, chain_type="stuff")
+
+        query = "Please provide a summary of the document in markdown format for notion document with full notes"
+        response = qa_chain.run(input_documents=documents, question=query)
+        return response
+    except Exception as e:
+        print(f"Error generating embeddings or retrieving information: {e}")
+        return None
+
+# Function to split text into blocks with headings support
+def split_text_to_blocks(text, max_length=2000):
+    blocks = []
+    while len(text) > max_length:
+        split_index = text.rfind('\n', 0, max_length)
+        if split_index == -1:
+            split_index = text.rfind(' ', 0, max_length)
+        if split_index == -1:
+            split_index = max_length
+        
+        block = text[:split_index]
+        text = text[split_index:].strip()
+
+        # Ensure block ends with a complete sentence
+        if not block.endswith('.') and len(text) > 0:
+            sentence_end_index = block.rfind('.')
+            if sentence_end_index != -1:
+                split_index = sentence_end_index + 1
+                block = block[:split_index]
+                text = text[split_index:].strip()
+
+        blocks.append(block)
+    blocks.append(text)
+    return blocks
 
 @app.post("/process-pdf/")
 async def process_pdf(file: UploadFile = File(...)):
@@ -178,6 +207,9 @@ async def process_pdf(file: UploadFile = File(...)):
     if not documents:
         raise HTTPException(status_code=400, detail="Failed to extract text from PDF")
     
+    global pdf_documents
+    pdf_documents = documents
+
     response = generate_embeddings_and_retrieve_info(documents)
     if not response:
         raise HTTPException(status_code=500, detail="Failed to generate response from the document")

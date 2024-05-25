@@ -2,9 +2,10 @@ fastapi
 requests
 json5
 langchain
-openai
+openai>=1.0.0
 python-dotenv
 pdfminer.six
 faiss-cpu
 langchain-community
 tiktoken
+langchain-openai

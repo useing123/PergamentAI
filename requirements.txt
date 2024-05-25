@@ -5,7 +5,7 @@ python-dotenv==1.0.0
 requests==2.31.0
 openai==0.28.1
 langchain==0.0.154
-langchain-core==0.2.1
+langchain-core==0.1.0
 langchain-community==0.0.6
 pydantic==1.10.13
 pdfminer.six==20231228

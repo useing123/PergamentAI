@@ -113,7 +113,25 @@ async def process_youtube(youtube_url: str = Form(...)):
     llm = OpenAI(model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
     qa_chain = load_qa_chain(llm, chain_type="stuff")
 
-    response = qa_chain.run(input_documents=[Document(page_content=transcript_text)], question="Please summarize the transcript in markdown format.")
+    response = qa_chain.run(input_documents=[Document(page_content=transcript_text)], question="""You are an AI assistant that focuses on enhancing productivity and organizing information for users. You excel at summarizing content, taking detailed notes, and providing recommendations for further reading. Your task is to summarize a document in markdown format for a Notion document, complete with full notes. Your summary should be concise and capture the key points of the document effectively. Your notes should provide additional context and insights to support the summary. Additionally, you are required to recommend books related to the document topic in the format of "Summary:", "Notes:", and "Recommended Books:" for a well-rounded understanding. Ensure the markdown file is easy to read and well-organized for optimal comprehension.
+
+---
+Example:
+Summary:
+The document discusses the impact of climate change on global weather patterns and offers solutions for mitigation through sustainable practices and policy changes.
+
+Notes:
+- Climate change is a pressing issue that requires immediate attention to prevent irreversible damage to the environment.
+- The document highlights the role of individuals, communities, and governments in combating climate change.
+- Sustainable practices such as renewable energy adoption and waste reduction are key components of the proposed solutions.
+
+Recommended Books:
+1. "This Changes Everything: Capitalism vs. the Climate" by Naomi Klein
+2. "The Sixth Extinction: An Unnatural History" by Elizabeth Kolbert
+3. "Drawdown: The Most Comprehensive Plan Ever Proposed to Reverse Global Warming" by Paul Hawken
+---
+
+Please provide a summary of the document in markdown format for a Notion document with full notes in this format: Summary:, Notes:, Recommended Books: Write the output in a good-to-read file in .md format.""")
     chat_history.append(response)
 
     global markdown_content
@@ -126,55 +144,63 @@ async def process_youtube(youtube_url: str = Form(...)):
         raise HTTPException(status_code=500, detail=result)
 
 
-def create_notion_page(content):
-    blocks = []
-    for line in content.split('\n'):
-        if line.startswith("# "):
-            blocks.append({
-                "object": "block",
-                "type": "heading_1",
-                "heading_1": {"rich_text": [{"type": "text", "text": {"content": line[2:]}}]}
-            })
-        elif line.startswith("## "):
-            blocks.append({
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {"rich_text": [{"type": "text", "text": {"content": line[3:]}}]}
-            })
-        elif line.startswith("### "):
-            blocks.append({
-                "object": "block",
-                "type": "heading_3",
-                "heading_3": {"rich_text": [{"type": "text", "text": {"content": line[4:]}}]}
-            })
-        elif line.startswith("- "):
-            blocks.append({
-                "object": "block",
-                "type": "bulleted_list_item",
-                "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": line[2:]}}]}
-            })
-        elif line.startswith("1. "):
-            blocks.append({
-                "object": "block",
-                "type": "numbered_list_item",
-                "numbered_list_item": {"rich_text": [{"type": "text", "text": {"content": line[3:]}}]}
-            })
-        else:
-            rich_text = []
-            parts = line.split('**')
-            for i, part in enumerate(parts):
-                if i % 2 == 0:
-                    subparts = part.split('*')
-                    for j, subpart in enumerate(subparts):
-                        if j % 2 == 0:
-                            rich_text.append({"type": "text", "text": {"content": subpart}})
-                        else:
-                            rich_text.append({"type": "text", "text": {"content": subpart, "annotations": {"italic": True}}})
+def create_rich_text(line):
+    rich_text = []
+    parts = line.split('**')
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            subparts = part.split('*')
+            for j, subpart in enumerate(subparts):
+                if j % 2 == 0:
+                    rich_text.append({"type": "text", "text": {"content": subpart}})
                 else:
-                    rich_text.append({"type": "text", "text": {"content": part, "annotations": {"bold": True}}})
+                    rich_text.append({"type": "text", "text": {"content": subpart, "annotations": {"italic": True}}})
+        else:
+            rich_text.append({"type": "text", "text": {"content": part, "annotations": {"bold": True}}})
+    return rich_text
 
-            blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": rich_text}})
-    
+def create_block(line):
+    if line.startswith("# "):
+        return {
+            "object": "block",
+            "type": "heading_1",
+            "heading_1": {"rich_text": [{"type": "text", "text": {"content": line[2:]}}]}
+        }
+    elif line.startswith("## "):
+        return {
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"type": "text", "text": {"content": line[3:]}}]}
+        }
+    elif line.startswith("### "):
+        return {
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": {"rich_text": [{"type": "text", "text": {"content": line[4:]}}]}
+        }
+    elif line.startswith("- "):
+        return {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": line[2:]}}]}
+        }
+    elif line.startswith("1. "):
+        return {
+            "object": "block",
+            "type": "numbered_list_item",
+            "numbered_list_item": {"rich_text": [{"type": "text", "text": {"content": line[3:]}}]}
+        }
+    else:
+        rich_text = create_rich_text(line)
+        return {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": rich_text}
+        }
+
+def create_notion_page(content):
+    blocks = [create_block(line) for line in content.split('\n')]
+
     data = {
         "parent": {"type": "page_id", "page_id": PARENT_PAGE_ID},
         "properties": {
@@ -202,7 +228,6 @@ def create_notion_page(content):
     else:
         return f"Failed to create page. Status code: {response.status_code}. Response: {response.text}"
 
-
 @app.post("/send-to-notion")
 async def send_to_notion():
     content = "\n".join(chat_history)
@@ -229,11 +254,25 @@ def generate_embeddings_and_retrieve_info(documents):
         llm = OpenAI(model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
         qa_chain = load_qa_chain(llm, chain_type="stuff")
 
-        query = """You're an AI assistant that specializes in creating summaries and document formatting. You excel at condensing information into clear, concise markdown format for easy integration into Notion documents.
-Your task is to generate a markdown-formatted summary of a document, including full notes. Ensure the summary is well-organized with proper formatting for easy readability.
-Keep in mind to capture the key points of the document while maintaining coherence and clarity in the summary.
+        query = """You are an AI assistant that focuses on enhancing productivity and organizing information for users. You excel at summarizing content, taking detailed notes, and providing recommendations for further reading. Your task is to summarize a document in markdown format for a Notion document, complete with full notes. Your summary should be concise and capture the key points of the document effectively. Your notes should provide additional context and insights to support the summary. Additionally, you are required to recommend books related to the document topic in the format of "Summary:", "Notes:", and "Recommended Books:" for a well-rounded understanding. Ensure the markdown file is easy to read and well-organized for optimal comprehension.
 
-Please provide a summary of the document in markdown format for a Notion document with full notes."""
+---
+Example:
+Summary:
+The document discusses the impact of climate change on global weather patterns and offers solutions for mitigation through sustainable practices and policy changes.
+
+Notes:
+- Climate change is a pressing issue that requires immediate attention to prevent irreversible damage to the environment.
+- The document highlights the role of individuals, communities, and governments in combating climate change.
+- Sustainable practices such as renewable energy adoption and waste reduction are key components of the proposed solutions.
+
+Recommended Books:
+1. "This Changes Everything: Capitalism vs. the Climate" by Naomi Klein
+2. "The Sixth Extinction: An Unnatural History" by Elizabeth Kolbert
+3. "Drawdown: The Most Comprehensive Plan Ever Proposed to Reverse Global Warming" by Paul Hawken
+---
+
+Please provide a summary of the document in markdown format for a Notion document with full notes in this format: Summary:, Notes:, Recommended Books: Write the output in a good-to-read file in .md format."""
         response = qa_chain.run(input_documents=documents, question=query)
         return response
     except Exception as e:

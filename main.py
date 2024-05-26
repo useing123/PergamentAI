@@ -1,5 +1,5 @@
-from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Form
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import json
@@ -10,8 +10,11 @@ from langchain.vectorstores import FAISS
 from langchain.chains import RetrievalQA
 from langchain.llms import OpenAI
 from langchain.chains.question_answering import load_qa_chain
+from langchain.schema import Document
 import os
 from dotenv import load_dotenv
+from youtube_transcript_api import YouTubeTranscriptApi
+import uuid
 
 load_dotenv()  # Load environment variables from .env file
 
@@ -42,6 +45,8 @@ headers = {
 
 chat_history = []
 pdf_documents = []
+markdown_content = ""
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -50,19 +55,76 @@ async def websocket_endpoint(websocket: WebSocket):
         data = await websocket.receive_text()
         chat_history.append(data)
 
-        if not pdf_documents:
-            await websocket.send_text("Please upload a PDF file first.")
+        if "youtube.com/watch" in data:
+            video_id = data.split("v=")[1].split("&")[0]
+            try:
+                transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                transcript_text = "\n".join([entry['text'] for entry in transcript])
+                data = transcript_text
+            except Exception as e:
+                await websocket.send_text(f"Failed to fetch transcript: {str(e)}")
+                continue
+
+        if not pdf_documents and "youtube.com/watch" not in data:
+            await websocket.send_text("Please upload a PDF file first or provide a YouTube video link.")
             continue
 
+        if "youtube.com/watch" in data:
+            documents = [Document(page_content=data)]
+        else:
+            embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+            vector_store = FAISS.from_documents(pdf_documents, embeddings)
+            retriever = vector_store.as_retriever()
+            llm = OpenAI(model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
+            qa_chain = load_qa_chain(llm, chain_type="stuff")
+
+            response = qa_chain.run(input_documents=pdf_documents, question=data)
+            chat_history.append(response)
+            await websocket.send_text(response)
+
         embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-        vector_store = FAISS.from_documents(pdf_documents, embeddings)
+        vector_store = FAISS.from_documents([Document(page_content=data)], embeddings)
         retriever = vector_store.as_retriever()
         llm = OpenAI(model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
         qa_chain = load_qa_chain(llm, chain_type="stuff")
 
-        response = qa_chain.run(input_documents=pdf_documents, question=data)
+        response = qa_chain.run(input_documents=[Document(page_content=data)], question="Please summarize the transcript.")
         chat_history.append(response)
         await websocket.send_text(response)
+
+
+@app.post("/process-youtube/")
+async def process_youtube(youtube_url: str = Form(...)):
+    if "youtube.com/watch" not in youtube_url:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+
+    video_id = youtube_url.split("v=")[1].split("&")[0]
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        transcript_text = "\n".join([entry['text'] for entry in transcript])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch transcript: {str(e)}")
+
+    chat_history.append(transcript_text)
+
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+    vector_store = FAISS.from_documents([Document(page_content=transcript_text)], embeddings)
+    retriever = vector_store.as_retriever()
+    llm = OpenAI(model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
+    qa_chain = load_qa_chain(llm, chain_type="stuff")
+
+    response = qa_chain.run(input_documents=[Document(page_content=transcript_text)], question="Please summarize the transcript in markdown format.")
+    chat_history.append(response)
+
+    global markdown_content
+    markdown_content = response
+
+    result = create_notion_page(response)
+    if "successfully" in result:
+        return JSONResponse(content={"message": result})
+    else:
+        raise HTTPException(status_code=500, detail=result)
+
 
 def create_notion_page(content):
     blocks = []
@@ -140,19 +202,24 @@ def create_notion_page(content):
     else:
         return f"Failed to create page. Status code: {response.status_code}. Response: {response.text}"
 
+
 @app.post("/send-to-notion")
 async def send_to_notion():
     content = "\n".join(chat_history)
+    global markdown_content
+    markdown_content = content
     result = create_notion_page(content)
     if "successfully" in result:
         return JSONResponse(content={"message": result})
     else:
         raise HTTPException(status_code=500, detail=result)
 
+
 def extract_text_from_pdf(pdf_path: str):
     loader = PDFMinerLoader(pdf_path)
     documents = loader.load()
     return documents
+
 
 def generate_embeddings_and_retrieve_info(documents):
     try:
@@ -162,37 +229,17 @@ def generate_embeddings_and_retrieve_info(documents):
         llm = OpenAI(model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
         qa_chain = load_qa_chain(llm, chain_type="stuff")
 
-        query = "Please provide a summary of the document in markdown format for notion document with full notes"
+        query = """You're an AI assistant that specializes in creating summaries and document formatting. You excel at condensing information into clear, concise markdown format for easy integration into Notion documents.
+Your task is to generate a markdown-formatted summary of a document, including full notes. Ensure the summary is well-organized with proper formatting for easy readability.
+Keep in mind to capture the key points of the document while maintaining coherence and clarity in the summary.
+
+Please provide a summary of the document in markdown format for a Notion document with full notes."""
         response = qa_chain.run(input_documents=documents, question=query)
         return response
     except Exception as e:
         print(f"Error generating embeddings or retrieving information: {e}")
         return None
 
-# Function to split text into blocks with headings support
-def split_text_to_blocks(text, max_length=2000):
-    blocks = []
-    while len(text) > max_length:
-        split_index = text.rfind('\n', 0, max_length)
-        if split_index == -1:
-            split_index = text.rfind(' ', 0, max_length)
-        if split_index == -1:
-            split_index = max_length
-        
-        block = text[:split_index]
-        text = text[split_index:].strip()
-
-        # Ensure block ends with a complete sentence
-        if not block.endswith('.') and len(text) > 0:
-            sentence_end_index = block.rfind('.')
-            if sentence_end_index != -1:
-                split_index = sentence_end_index + 1
-                block = block[:split_index]
-                text = text[split_index:].strip()
-
-        blocks.append(block)
-    blocks.append(text)
-    return blocks
 
 @app.post("/process-pdf/")
 async def process_pdf(file: UploadFile = File(...)):
@@ -214,8 +261,26 @@ async def process_pdf(file: UploadFile = File(...)):
     if not response:
         raise HTTPException(status_code=500, detail="Failed to generate response from the document")
     
+    global markdown_content
+    markdown_content = response
     result = create_notion_page(response)
     if "successfully" in result:
         return JSONResponse(content={"message": result})
     else:
         raise HTTPException(status_code=500, detail=result)
+
+
+@app.get("/download-markdown/")
+async def download_markdown():
+    global markdown_content
+    if not markdown_content:
+        raise HTTPException(status_code=404, detail="No content available to download")
+    
+    file_id = str(uuid.uuid4())
+    file_path = f"downloads/{file_id}.md"
+    os.makedirs("downloads", exist_ok=True)
+    
+    with open(file_path, "w") as f:
+        f.write(markdown_content)
+    
+    return FileResponse(file_path, filename="generated_notes.md")

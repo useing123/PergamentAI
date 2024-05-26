@@ -9,3 +9,4 @@ faiss-cpu
 langchain-community==0.0.38
 tiktoken
 pydantic==1.10.7
+youtube-transcript-api
